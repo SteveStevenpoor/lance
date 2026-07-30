@@ -25,7 +25,11 @@ cd "$REPO_ROOT"
 RUN_ID="${1:-fts-compare-$(date -u +%Y%m%dT%H%M%SZ)}"
 SIZES="${SIZES:-100000 500000 1000000}"
 K="${K:-10}"
-THREADS="${THREADS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)}"
+DEFAULT_THREADS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
+if (( DEFAULT_THREADS > 64 )); then
+    DEFAULT_THREADS=64
+fi
+THREADS="${THREADS:-$DEFAULT_THREADS}"
 CACHE_DIR="${CACHE_DIR:-${TMPDIR:-/tmp}/lance-fineweb-cache}"
 WORK="${WORK:-${TMPDIR:-/tmp}/fts_compare/$RUN_ID}"
 RESULT_DIR="$REPO_ROOT/target/fts-compare-results/$RUN_ID"

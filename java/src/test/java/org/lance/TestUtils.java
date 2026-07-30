@@ -55,18 +55,98 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.ThreadPoolExecutor;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class TestUtils {
+  /**
+   * Creates a fixed-size test executor that rejects tasks beyond its worker capacity instead of
+   * retaining them in an unbounded queue.
+   */
+  public static ExecutorService newBoundedFixedThreadPool(int threadCount) {
+    if (threadCount < 1) {
+      throw new IllegalArgumentException("threadCount must be positive; got " + threadCount);
+    }
+    return new ThreadPoolExecutor(
+        threadCount,
+        threadCount,
+        0,
+        java.util.concurrent.TimeUnit.MILLISECONDS,
+        new SynchronousQueue<>(),
+        new ThreadPoolExecutor.AbortPolicy());
+  }
+
+  /** Stops test executors before their associated test resources are closed. */
+  public static void shutdownExecutors(List<ExecutorService> executors) {
+    List<RuntimeException> failures = new ArrayList<>();
+    for (ExecutorService executor : executors) {
+      try {
+        executor.shutdownNow();
+      } catch (RuntimeException e) {
+        failures.add(e);
+      }
+    }
+
+    boolean interrupted = false;
+    for (ExecutorService executor : executors) {
+      try {
+        if (!executor.awaitTermination(10, java.util.concurrent.TimeUnit.SECONDS)) {
+          failures.add(new IllegalStateException("Test executor did not terminate"));
+        }
+      } catch (InterruptedException e) {
+        interrupted = true;
+        failures.add(new IllegalStateException("Interrupted while stopping test executor", e));
+      }
+    }
+    if (interrupted) {
+      Thread.currentThread().interrupt();
+    }
+    if (!failures.isEmpty()) {
+      IllegalStateException exception = new IllegalStateException("Failed to stop test executors");
+      for (RuntimeException failure : failures) {
+        exception.addSuppressed(failure);
+      }
+      throw exception;
+    }
+  }
+
+  /** Stops a test executor before the resources used by its tasks are closed. */
+  public static void shutdownExecutor(ExecutorService executor) {
+    shutdownExecutors(Collections.singletonList(executor));
+  }
+
+  /** Asserts concurrent task results and retains the first task failure as the assertion cause. */
+  public static void assertTaskResults(
+      int expectedTasks, int successfulTasks, int failedTasks, Throwable firstFailure) {
+    if (expectedTasks != successfulTasks || failedTasks != 0) {
+      AssertionError error =
+          new AssertionError(
+              "Expected "
+                  + expectedTasks
+                  + " successful tasks and no failures, but got "
+                  + successfulTasks
+                  + " successful tasks and "
+                  + failedTasks
+                  + " failures");
+      if (firstFailure != null) {
+        error.initCause(firstFailure);
+      }
+      throw error;
+    }
+  }
+
   private abstract static class TestDataset {
     protected final BufferAllocator allocator;
     protected final String datasetPath;

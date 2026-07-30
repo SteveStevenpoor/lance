@@ -18,6 +18,7 @@ import org.lance.Dataset;
 import org.lance.Fragment;
 import org.lance.FragmentMetadata;
 import org.lance.ReadOptions;
+import org.lance.TestUtils;
 import org.lance.Transaction;
 import org.lance.WriteParams;
 import org.lance.namespace.errors.ErrorCode;
@@ -86,9 +87,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -99,6 +100,7 @@ public class DirectoryNamespaceTest {
   protected BufferAllocator allocator;
   protected LanceNamespace namespaceClient;
   protected DirectoryNamespace innerNamespaceClient;
+  private final List<ExecutorService> executors = new ArrayList<>();
 
   @BeforeEach
   void setUp() {
@@ -124,15 +126,19 @@ public class DirectoryNamespaceTest {
 
   @AfterEach
   void tearDown() {
-    if (namespaceClient != null && namespaceClient instanceof java.io.Closeable) {
-      try {
-        ((java.io.Closeable) namespaceClient).close();
-      } catch (Exception e) {
-        // Ignore
+    try {
+      TestUtils.shutdownExecutors(executors);
+    } finally {
+      if (namespaceClient != null && namespaceClient instanceof java.io.Closeable) {
+        try {
+          ((java.io.Closeable) namespaceClient).close();
+        } catch (Exception e) {
+          // Ignore
+        }
       }
-    }
-    if (allocator != null) {
-      allocator.close();
+      if (allocator != null) {
+        allocator.close();
+      }
     }
   }
 
@@ -850,11 +856,13 @@ public class DirectoryNamespaceTest {
     namespaceClient.createNamespace(createNsReq);
 
     int numTables = 10;
-    ExecutorService executor = Executors.newFixedThreadPool(numTables);
+    ExecutorService executor = TestUtils.newBoundedFixedThreadPool(numTables);
+    executors.add(executor);
     CountDownLatch startLatch = new CountDownLatch(1);
     CountDownLatch doneLatch = new CountDownLatch(numTables);
     AtomicInteger successCount = new AtomicInteger(0);
     AtomicInteger failCount = new AtomicInteger(0);
+    AtomicReference<Throwable> firstFailure = new AtomicReference<>();
 
     for (int i = 0; i < numTables; i++) {
       final int tableIndex = i;
@@ -877,6 +885,7 @@ public class DirectoryNamespaceTest {
               successCount.incrementAndGet();
             } catch (Exception e) {
               failCount.incrementAndGet();
+              firstFailure.compareAndSet(null, e);
             } finally {
               doneLatch.countDown();
             }
@@ -889,8 +898,7 @@ public class DirectoryNamespaceTest {
     executor.shutdown();
     assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS));
 
-    assertEquals(numTables, successCount.get(), "All tasks should succeed");
-    assertEquals(0, failCount.get(), "No tasks should fail");
+    TestUtils.assertTaskResults(numTables, successCount.get(), failCount.get(), firstFailure.get());
 
     ListTablesRequest listReq = new ListTablesRequest().id(Arrays.asList("test_ns"));
     ListTablesResponse listResp = namespaceClient.listTables(listReq);
@@ -912,11 +920,13 @@ public class DirectoryNamespaceTest {
     initNs.close();
 
     int numTables = 10;
-    ExecutorService executor = Executors.newFixedThreadPool(numTables);
+    ExecutorService executor = TestUtils.newBoundedFixedThreadPool(numTables);
+    executors.add(executor);
     CountDownLatch startLatch = new CountDownLatch(1);
     CountDownLatch doneLatch = new CountDownLatch(numTables);
     AtomicInteger successCount = new AtomicInteger(0);
     AtomicInteger failCount = new AtomicInteger(0);
+    AtomicReference<Throwable> firstFailure = new AtomicReference<>();
     List<DirectoryNamespace> namespaces = new ArrayList<>();
 
     for (int i = 0; i < numTables; i++) {
@@ -951,6 +961,7 @@ public class DirectoryNamespaceTest {
               successCount.incrementAndGet();
             } catch (Exception e) {
               failCount.incrementAndGet();
+              firstFailure.compareAndSet(null, e);
             } finally {
               doneLatch.countDown();
             }
@@ -972,8 +983,7 @@ public class DirectoryNamespaceTest {
       }
     }
 
-    assertEquals(numTables, successCount.get(), "All tasks should succeed");
-    assertEquals(0, failCount.get(), "No tasks should fail");
+    TestUtils.assertTaskResults(numTables, successCount.get(), failCount.get(), firstFailure.get());
 
     // Verify with a fresh namespace
     DirectoryNamespace verifyNs = new DirectoryNamespace();
@@ -1005,10 +1015,13 @@ public class DirectoryNamespaceTest {
     int numTables = 10;
 
     // First, create all tables using separate namespace instances
-    ExecutorService createExecutor = Executors.newFixedThreadPool(numTables);
+    ExecutorService createExecutor = TestUtils.newBoundedFixedThreadPool(numTables);
+    executors.add(createExecutor);
     CountDownLatch createStartLatch = new CountDownLatch(1);
     CountDownLatch createDoneLatch = new CountDownLatch(numTables);
     AtomicInteger createSuccessCount = new AtomicInteger(0);
+    AtomicInteger createFailCount = new AtomicInteger(0);
+    AtomicReference<Throwable> createFirstFailure = new AtomicReference<>();
     List<DirectoryNamespace> createNamespaces = new ArrayList<>();
 
     for (int i = 0; i < numTables; i++) {
@@ -1038,7 +1051,8 @@ public class DirectoryNamespaceTest {
 
               createSuccessCount.incrementAndGet();
             } catch (Exception e) {
-              // Ignore - test will fail on assertion
+              createFailCount.incrementAndGet();
+              createFirstFailure.compareAndSet(null, e);
             } finally {
               createDoneLatch.countDown();
             }
@@ -1049,7 +1063,8 @@ public class DirectoryNamespaceTest {
     assertTrue(createDoneLatch.await(60, TimeUnit.SECONDS), "Timed out waiting for creates");
     createExecutor.shutdown();
 
-    assertEquals(numTables, createSuccessCount.get(), "All creates should succeed");
+    TestUtils.assertTaskResults(
+        numTables, createSuccessCount.get(), createFailCount.get(), createFirstFailure.get());
 
     // Close create namespaces
     for (DirectoryNamespace ns : createNamespaces) {
@@ -1061,11 +1076,13 @@ public class DirectoryNamespaceTest {
     }
 
     // Now drop all tables using NEW namespace instances
-    ExecutorService dropExecutor = Executors.newFixedThreadPool(numTables);
+    ExecutorService dropExecutor = TestUtils.newBoundedFixedThreadPool(numTables);
+    executors.add(dropExecutor);
     CountDownLatch dropStartLatch = new CountDownLatch(1);
     CountDownLatch dropDoneLatch = new CountDownLatch(numTables);
     AtomicInteger dropSuccessCount = new AtomicInteger(0);
     AtomicInteger dropFailCount = new AtomicInteger(0);
+    AtomicReference<Throwable> dropFirstFailure = new AtomicReference<>();
     List<DirectoryNamespace> dropNamespaces = new ArrayList<>();
 
     for (int i = 0; i < numTables; i++) {
@@ -1095,6 +1112,7 @@ public class DirectoryNamespaceTest {
               dropSuccessCount.incrementAndGet();
             } catch (Exception e) {
               dropFailCount.incrementAndGet();
+              dropFirstFailure.compareAndSet(null, e);
             } finally {
               dropDoneLatch.countDown();
             }
@@ -1114,8 +1132,8 @@ public class DirectoryNamespaceTest {
       }
     }
 
-    assertEquals(numTables, dropSuccessCount.get(), "All drops should succeed");
-    assertEquals(0, dropFailCount.get(), "No drops should fail");
+    TestUtils.assertTaskResults(
+        numTables, dropSuccessCount.get(), dropFailCount.get(), dropFirstFailure.get());
   }
 
   @Test
